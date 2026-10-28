@@ -11,10 +11,22 @@ pub enum Kind {
     Received,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Category {
+    Send,
+    Receive,
+    PayBill,
+    BuyGoods,
+    Pochi,
+    Airtime,
+    Withdrawal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     pub code: String,
     pub kind: Kind,
+    pub category: Category,
     pub amount_cents: i64,
     pub counterparty: String,
     pub date: String,
@@ -98,16 +110,37 @@ pub fn parse_message(raw: &str) -> Result<Transaction, ParseError> {
     let balance_cents = balance_re()
         .captures(text)
         .and_then(|c| to_cents(&c["bal"]));
+    let category = classify_category(&kind, text);
 
     Ok(Transaction {
         code: caps["code"].to_uppercase(),
         kind,
+        category,
         amount_cents,
         counterparty: caps["who"].trim().to_string(),
         date: caps["date"].to_string(),
         time: caps["time"].to_string(),
         balance_cents,
     })
+}
+
+fn classify_category(kind: &Kind, text: &str) -> Category {
+    let text = text.to_ascii_lowercase();
+    if text.contains("pochi") {
+        Category::Pochi
+    } else if text.contains("pay bill") || text.contains("paybill") {
+        Category::PayBill
+    } else if text.contains("buy goods") || text.contains("till number") {
+        Category::BuyGoods
+    } else if text.contains("airtime") {
+        Category::Airtime
+    } else if text.contains("withdraw") {
+        Category::Withdrawal
+    } else if *kind == Kind::Sent {
+        Category::Send
+    } else {
+        Category::Receive
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +155,7 @@ mod tests {
         let t = parse_message(SENT).unwrap();
         assert_eq!(t.kind, Kind::Sent);
         assert_eq!(t.code, "QGH7XYZ123");
+        assert_eq!(t.category, Category::Send);
         assert_eq!(t.amount_cents, 50_000);
         assert_eq!(t.counterparty, "JOHN DOE 0712345678");
         assert_eq!(t.balance_cents, Some(125_050));
@@ -131,16 +165,44 @@ mod tests {
     fn parses_received() {
         let t = parse_message(RECEIVED).unwrap();
         assert_eq!(t.kind, Kind::Received);
+        assert_eq!(t.category, Category::Receive);
         assert_eq!(t.amount_cents, 100_000);
         assert_eq!(t.time, "9:05 AM");
     }
 
     #[test]
+    fn classifies_payment_types_from_message_text() {
+        let cases = [
+            (
+                "QGH7PAY123 Confirmed. Ksh500.00 sent to MARKET paybill for account 42 on 12/3/26 at 2:15 PM.",
+                Category::PayBill,
+            ),
+            (
+                "QGH7BUY123 Confirmed. Ksh500.00 sent to MARKET Buy Goods on 12/3/26 at 2:15 PM.",
+                Category::BuyGoods,
+            ),
+            (
+                "QGH7POC123 Confirmed. Ksh500.00 sent to M-PESA Pochi la Biashara on 12/3/26 at 2:15 PM.",
+                Category::Pochi,
+            ),
+            (
+                "QGH7AIR123 Confirmed. Ksh500.00 sent to Safaricom Airtime on 12/3/26 at 2:15 PM.",
+                Category::Airtime,
+            ),
+            (
+                "QGH7WDR123 Confirmed. Ksh500.00 sent to ATM withdrawal on 12/3/26 at 2:15 PM.",
+                Category::Withdrawal,
+            ),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(parse_message(message).unwrap().category, expected);
+        }
+    }
+
+    #[test]
     fn rejects_garbage() {
-        assert_eq!(
-            parse_message("hello there"),
-            Err(ParseError::Unrecognised)
-        );
+        assert_eq!(parse_message("hello there"), Err(ParseError::Unrecognised));
     }
 
     #[test]

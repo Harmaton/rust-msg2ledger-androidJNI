@@ -1,4 +1,4 @@
-use crate::{Kind, Transaction};
+use crate::{Category, Kind, Transaction};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use std::collections::HashMap;
 
@@ -19,6 +19,127 @@ pub struct DaySummary {
     pub sent_count: usize,
     pub biggest_cents: i64,
     pub top_counterparty: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategorySpending {
+    pub category: Category,
+    pub amount_cents: i64,
+    pub transaction_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegularCounterparty {
+    pub counterparty: String,
+    pub sent_count: usize,
+    pub total_sent_cents: i64,
+    pub received_count: usize,
+    pub total_received_cents: i64,
+}
+
+pub fn spending_by_category(
+    txs: &[Transaction],
+    from: Option<NaiveDate>,
+    through: Option<NaiveDate>,
+) -> Vec<CategorySpending> {
+    let mut totals: HashMap<Category, (i64, usize)> = HashMap::new();
+    for transaction in txs.iter().filter(|transaction| {
+        transaction
+            .occurred_at()
+            .map(|at| {
+                from.is_none_or(|date| at.date() >= date)
+                    && through.is_none_or(|date| at.date() <= date)
+            })
+            .unwrap_or(false)
+            && transaction.kind == Kind::Sent
+    }) {
+        let total = totals.entry(transaction.category).or_default();
+        total.0 += transaction.amount_cents;
+        total.1 += 1;
+    }
+
+    let mut spending: Vec<_> = totals
+        .into_iter()
+        .map(
+            |(category, (amount_cents, transaction_count))| CategorySpending {
+                category,
+                amount_cents,
+                transaction_count,
+            },
+        )
+        .collect();
+    spending.sort_by(|a, b| {
+        b.amount_cents
+            .cmp(&a.amount_cents)
+            .then_with(|| category_label(a.category).cmp(category_label(b.category)))
+    });
+    spending
+}
+
+pub fn regular_counterparties(
+    txs: &[Transaction],
+    from: Option<NaiveDate>,
+    min_transactions: usize,
+) -> Vec<RegularCounterparty> {
+    let mut totals: HashMap<&str, (usize, i64, usize, i64)> = HashMap::new();
+    for transaction in txs.iter().filter(|transaction| {
+        transaction
+            .occurred_at()
+            .map(|at| from.is_none_or(|date| at.date() >= date))
+            .unwrap_or(false)
+    }) {
+        let total = totals.entry(transaction.counterparty.trim()).or_default();
+        match transaction.kind {
+            Kind::Sent => {
+                total.0 += 1;
+                total.1 += transaction.amount_cents;
+            }
+            Kind::Received => {
+                total.2 += 1;
+                total.3 += transaction.amount_cents;
+            }
+        }
+    }
+
+    let mut regulars: Vec<_> = totals
+        .into_iter()
+        .filter(|(_, (sent_count, _, received_count, _))| {
+            sent_count + received_count >= min_transactions
+        })
+        .map(
+            |(
+                counterparty,
+                (sent_count, total_sent_cents, received_count, total_received_cents),
+            )| {
+                RegularCounterparty {
+                    counterparty: counterparty.to_string(),
+                    sent_count,
+                    total_sent_cents,
+                    received_count,
+                    total_received_cents,
+                }
+            },
+        )
+        .collect();
+    regulars.sort_by(|a, b| {
+        (b.sent_count + b.received_count)
+            .cmp(&(a.sent_count + a.received_count))
+            .then_with(|| b.total_sent_cents.cmp(&a.total_sent_cents))
+            .then_with(|| a.counterparty.cmp(&b.counterparty))
+    });
+    regulars
+}
+
+pub fn category_label(category: Category) -> &'static str {
+    match category {
+        Category::Send => "Send",
+        Category::Receive => "Receive",
+        Category::PayBill => "PayBill",
+        Category::BuyGoods => "BuyGoods",
+        Category::Pochi => "Pochi",
+        Category::Airtime => "Airtime",
+        Category::Withdrawal => "Withdrawal",
+    }
 }
 
 pub fn summarize_day(txs: &[Transaction], day: NaiveDate) -> DaySummary {
@@ -177,5 +298,32 @@ mod tests {
         let summary = summarize_day(&transactions(), day);
         assert_eq!(summary_text(&summary, 7_142), "No spending recorded today.");
         assert_eq!(avg_daily_spend(&transactions(), day, 0), 0);
+    }
+
+    #[test]
+    fn groups_spending_and_finds_regular_counterparties() {
+        let mut txs = transactions();
+        txs.push(parse_message(
+            "QGH7XYZ124 Confirmed. Ksh100.00 sent to JOHN DOE 0712345678 on 13/3/26 at 7:15 PM.",
+        )
+        .unwrap());
+        txs.push(parse_message(
+            "QGH7XYZ125 Confirmed. Ksh200.00 sent to MARKET paybill for account 42 on 13/3/26 at 7:15 PM.",
+        )
+        .unwrap());
+
+        let from = NaiveDate::from_ymd_opt(2026, 3, 12).unwrap();
+        let categories = spending_by_category(&txs, Some(from), None);
+        let paybill = categories
+            .iter()
+            .find(|category| category.category == Category::PayBill)
+            .unwrap();
+        assert_eq!(paybill.amount_cents, 20_000);
+        assert_eq!(paybill.transaction_count, 1);
+
+        let regulars = regular_counterparties(&txs, Some(from), 2);
+        assert_eq!(regulars[0].counterparty, "JOHN DOE 0712345678");
+        assert_eq!(regulars[0].sent_count, 2);
+        assert_eq!(regulars[0].total_sent_cents, 60_000);
     }
 }
