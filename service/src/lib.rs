@@ -1,6 +1,147 @@
-use msg2ledger_core::{Category, Kind, Transaction, parse_message};
+use chrono::NaiveDate;
+use jni::{
+    JNIEnv,
+    objects::{JObject, JString},
+    sys::{JNI_FALSE, JNI_TRUE, jboolean, jstring},
+};
+use msg2ledger_core::{
+    Category, Kind, Transaction,
+    analytics::{avg_daily_spend, format_ksh, summarize_day, summary_text},
+    parse_message,
+};
 use rusqlite::{Connection, Row, Transaction as SqlTransaction, params};
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
+
+static STORE: OnceLock<Mutex<Option<MessageStore>>> = OnceLock::new();
+
+fn store_slot() -> &'static Mutex<Option<MessageStore>> {
+    STORE.get_or_init(|| Mutex::new(None))
+}
+
+fn java_string(env: &mut JNIEnv, value: JString) -> Result<String, String> {
+    env.get_string(&value)
+        .map(Into::into)
+        .map_err(|error| error.to_string())
+}
+
+fn return_java_string(env: &mut JNIEnv, value: &str) -> jstring {
+    match env.new_string(value) {
+        Ok(value) => value.into_raw(),
+        Err(error) => {
+            throw_java_error(env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn throw_java_error(env: &mut JNIEnv, error: impl std::fmt::Display) {
+    if let Err(throw_error) = env.throw_new("java/lang/IllegalStateException", error.to_string()) {
+        eprintln!("could not raise JNI exception: {throw_error}");
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_MainActivity_nativeOpen(
+    mut env: JNIEnv,
+    _this: JObject,
+    path: JString,
+) -> jboolean {
+    let result = java_string(&mut env, path).and_then(|path| {
+        let store = MessageStore::open(path).map_err(|error| error.to_string())?;
+        let mut slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        *slot = Some(store);
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => JNI_TRUE,
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            JNI_FALSE
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_MainActivity_nativeIngestMessage(
+    mut env: JNIEnv,
+    _this: JObject,
+    sender: JString,
+    raw: JString,
+) -> jstring {
+    let result = (|| {
+        let sender = java_string(&mut env, sender)?;
+        let raw = java_string(&mut env, raw)?;
+        let mut slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_mut()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        let result = store
+            .ingest_message(&sender, &raw)
+            .map_err(|error| error.to_string())?;
+        Ok::<String, String>(match result {
+            IngestResult::IgnoredNonMpesa => "ignored_non_mpesa".to_string(),
+            IngestResult::Stored(transaction) => {
+                format!("stored:{}", transaction.code)
+            }
+            IngestResult::StoredUnparsed(error) => format!("saved_for_review:{error}"),
+            IngestResult::DuplicateMessage => "duplicate_message".to_string(),
+            IngestResult::DuplicateTransaction(code) => {
+                format!("duplicate_transaction:{code}")
+            }
+        })
+    })();
+
+    match result {
+        Ok(value) => return_java_string(&mut env, &value),
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_MainActivity_nativeDailySummary(
+    mut env: JNIEnv,
+    _this: JObject,
+    date: JString,
+) -> jstring {
+    let result = (|| {
+        let date = java_string(&mut env, date)?;
+        let day = NaiveDate::parse_from_str(&date, "%d/%m/%y")
+            .map_err(|error| format!("invalid date {date:?}; expected DD/MM/YY: {error}"))?;
+        let slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_ref()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        let transactions = store.transactions().map_err(|error| error.to_string())?;
+        let summary = summarize_day(&transactions, day);
+        let average = avg_daily_spend(&transactions, day, 7);
+        Ok::<String, String>(format!(
+            "{} Received: {}.",
+            summary_text(&summary, average),
+            format_ksh(summary.received_cents)
+        ))
+    })();
+
+    match result {
+        Ok(value) => return_java_string(&mut env, &value),
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum IngestResult {

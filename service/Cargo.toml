@@ -3,10 +3,11 @@ name = "service"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-apalis = "1.0.0"
-apalis-sqlite = "1.0.0"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+jni = "0.21.1"
 msg2ledger-core = { version = "0.1.0", path = "../core" }
-rusqlite = "0.37.0"
-sqlx = "0.9.0"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
