@@ -1,0 +1,5 @@
+
+QGH7XYZ123 Confirmed. Ksh500.00 sent to JOHN DOE 0712345678 on 12/3/26 at 2:15 PM. New M-PESA balance is Ksh1,250.50. Transaction cost, Ksh7.00.
+QGH7ABC456 Confirmed. You have received Ksh1,000.00 from JANE WANGARI 0722333444 on 12/3/26 at 9:05 AM. New M-PESA balance is Ksh2,250.50.
+QGH7DEF789 Confirmed. Ksh75.00 sent to KAMAU STORES 0733111222 on 13/3/26 at 6:40 PM. New M-PESA balance is Ksh2,175.50.
+this is not a transaction message

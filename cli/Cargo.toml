@@ -1,0 +1,7 @@
+[package]
+name = "msg2ledger-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+msg2ledger-core = { path = "../core" }
