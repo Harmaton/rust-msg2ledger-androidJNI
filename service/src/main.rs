@@ -1,3 +1,3 @@
-fn main() {
-    println!("Hello, world!");
+fn main() -> rivium_host::Code {
+    rivium_host::process::run::<service::LedgerApplication>()
 }
