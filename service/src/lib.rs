@@ -372,6 +372,53 @@ pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeDashboard
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeCategoryTransactions(
+    mut env: JNIEnv,
+    _class: JObject,
+    date: JString,
+    category: JString,
+    offset: jni::sys::jint,
+    limit: jni::sys::jint,
+) -> jstring {
+    let result = (|| {
+        let date = java_string(&mut env, date)?;
+        let day = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .map_err(|error| format!("invalid date {date:?}; expected YYYY-MM-DD: {error}"))?;
+        let category = java_string(&mut env, category)?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| "transaction offset must not be negative".to_string())?;
+        let limit = usize::try_from(limit)
+            .map_err(|_| "transaction page size must not be negative".to_string())?;
+        if limit == 0 || limit > 100 {
+            return Err("transaction page size must be between 1 and 100".to_string());
+        }
+        let slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_ref()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        store
+            .category_transactions(
+                day,
+                (category != "All").then_some(category.as_str()),
+                offset,
+                limit,
+            )
+            .map(|value| value.to_string())
+            .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(value) => return_java_string(&mut env, &value),
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeCounterpartyDetail(
     mut env: JNIEnv,
     _class: JObject,
@@ -616,7 +663,7 @@ impl MessageStore {
         let summary = summarize_day(&transactions, day);
         let average = avg_daily_spend(&transactions, day, 7);
         let settings = self.counterparty_settings()?;
-        let mut categories = std::collections::BTreeMap::<String, (i64, usize)>::new();
+        let mut categories = std::collections::BTreeMap::<String, (i64, usize, i64)>::new();
         let mut counterparties =
             std::collections::BTreeMap::<String, (i64, usize, String, Option<i64>, i64, i64)>::new(
             );
@@ -662,6 +709,7 @@ impl MessageStore {
                 let category_total = categories.entry(category).or_default();
                 category_total.0 += transaction.amount_cents;
                 category_total.1 += 1;
+                category_total.2 = category_total.2.max(transaction.amount_cents);
             }
             if occurred_date.is_some_and(|date| (week_start..=day).contains(&date)) {
                 party.5 += transaction.amount_cents;
@@ -670,8 +718,13 @@ impl MessageStore {
 
         let mut categories: Vec<Value> = categories
             .into_iter()
-            .map(|(name, (spent_cents, count))| {
-                json!({"name": name, "spent_cents": spent_cents, "count": count})
+            .map(|(name, (spent_cents, count, largest_spend_cents))| {
+                json!({
+                    "name": name,
+                    "spent_cents": spent_cents,
+                    "count": count,
+                    "largest_spend_cents": largest_spend_cents,
+                })
             })
             .collect();
         categories.sort_by(|left, right| {
@@ -751,6 +804,59 @@ impl MessageStore {
             "categories": categories,
             "counterparties": counterparties,
             "insights": insights,
+        }))
+    }
+
+    pub fn category_transactions(
+        &self,
+        day: NaiveDate,
+        category: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> rusqlite::Result<Value> {
+        let settings = self.counterparty_settings()?;
+        let mut transactions: Vec<_> = self
+            .transactions()?
+            .into_iter()
+            .filter_map(|transaction| {
+                let occurred_at = transaction.occurred_at()?;
+                if occurred_at.date() != day || transaction.kind != Kind::Sent {
+                    return None;
+                }
+                let transaction_category = settings.get(&transaction.counterparty).map_or_else(
+                    || category_name(transaction.category).to_string(),
+                    |(value, _)| value.clone(),
+                );
+                if category.is_some_and(|filter| filter != transaction_category) {
+                    return None;
+                }
+                Some((
+                    occurred_at,
+                    transaction.code.clone(),
+                    json!({
+                        "code": transaction.code,
+                        "category": transaction_category,
+                        "amount_cents": transaction.amount_cents,
+                        "counterparty": transaction.counterparty,
+                        "date": transaction.date,
+                        "time": transaction.time,
+                    }),
+                ))
+            })
+            .collect();
+        transactions.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+        let has_more = transactions.len() > offset.saturating_add(limit);
+        let page: Vec<Value> = transactions
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, _, transaction)| transaction)
+            .collect();
+        let next_offset = offset.saturating_add(page.len());
+        Ok(json!({
+            "transactions": page,
+            "next_offset": next_offset,
+            "has_more": has_more,
         }))
     }
 
@@ -1034,6 +1140,7 @@ mod tests {
         assert_eq!(report["weekly_spent_cents"], 50_000);
         assert_eq!(report["counterparties"][0]["name"], "JOHN DOE 0712345678");
         assert_eq!(report["categories"][0]["name"], "Send");
+        assert_eq!(report["categories"][0]["largest_spend_cents"], 50_000);
 
         store
             .set_counterparty_settings("JOHN DOE 0712345678", "Shopping", 30_000)
@@ -1046,6 +1153,46 @@ mod tests {
         assert_eq!(details["busiest_day"], "Thursday");
         assert_eq!(details["transactions"].as_array().unwrap().len(), 1);
         assert_eq!(details["transactions"][0]["category"], "Shopping");
+    }
+
+    #[test]
+    fn category_transactions_are_filtered_and_paginated() {
+        let mut store = MessageStore::in_memory().unwrap();
+        store.ingest_message("MPESA", SENT).unwrap();
+        store
+            .ingest_message(
+                "MPESA",
+                "QGH7PAY456 Confirmed. Ksh250.00 sent to MARKET paybill for account 42 on 12/3/26 at 3:15 PM.",
+            )
+            .unwrap();
+        store
+            .ingest_message(
+                "MPESA",
+                "QGH7SML456 Confirmed. Ksh100.00 sent to SMALL SHOP on 12/3/26 at 1:15 PM.",
+            )
+            .unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 3, 12).unwrap();
+        let dashboard = store.dashboard(day).unwrap();
+        assert_eq!(dashboard["categories"][0]["name"], "Send");
+        assert_eq!(dashboard["categories"][0]["largest_spend_cents"], 50_000);
+
+        let first_page = store
+            .category_transactions(day, Some("Send"), 0, 1)
+            .unwrap();
+        assert_eq!(first_page["transactions"].as_array().unwrap().len(), 1);
+        assert_eq!(first_page["transactions"][0]["category"], "Send");
+        assert_eq!(first_page["next_offset"], 1);
+        assert_eq!(first_page["has_more"], true);
+
+        let second_page = store
+            .category_transactions(day, Some("Send"), 1, 1)
+            .unwrap();
+        assert_eq!(second_page["transactions"][0]["amount_cents"], 10_000);
+        assert_eq!(second_page["has_more"], false);
+
+        let all_categories = store.category_transactions(day, None, 0, 1).unwrap();
+        assert_eq!(all_categories["transactions"].as_array().unwrap().len(), 1);
+        assert_eq!(all_categories["has_more"], true);
     }
 
     #[test]

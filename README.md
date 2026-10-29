@@ -59,12 +59,18 @@ private SQLite database. Its background path is:
    query the ledger and post local spending or budget notifications.
 
 The home screen reads real ledger data: today's spend and receipts, spending
-categories, regular counterparties and rule-based on-device insights. A
+categories with each category's largest payment, regular counterparties and
+rule-based on-device insights. Horizontally scrollable category filters show
+matching transactions in pages of 30, rendered by a lazy list. A
 counterparty opens its transaction history, busiest spending weekday, weekly
 average, editable category and optional daily spending cap. Daily and weekly
 budgets, notification frequency and Android permissions are configurable in
 Settings. The “spending coach” is deterministic rule-based logic; no message or
 financial data is sent to an AI service.
+
+The Android launcher uses the adaptive launcher icon resources under
+`android/app/src/main/res`; reinstalling is not normally required after
+updating the installed app with a newly built APK.
 
 The native build targets `arm64-v8a` phones and `x86_64` emulators. Install
 Android Studio with the Android SDK and NDK, install both Rust Android targets

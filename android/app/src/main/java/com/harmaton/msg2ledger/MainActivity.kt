@@ -31,7 +31,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -71,6 +73,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -131,7 +135,12 @@ private val DarkColors = darkColorScheme(
     error = Color(0xFFE57368),
 )
 
-private data class CategorySpend(val name: String, val spentCents: Long, val count: Int)
+private data class CategorySpend(
+    val name: String,
+    val spentCents: Long,
+    val count: Int,
+    val largestSpendCents: Long = 0,
+)
 
 private data class Counterparty(
     val name: String,
@@ -152,6 +161,21 @@ private data class Dashboard(
     val categories: List<CategorySpend>,
     val counterparties: List<Counterparty>,
     val insights: List<String>,
+)
+
+private data class LedgerTransaction(
+    val code: String,
+    val category: String,
+    val amountCents: Long,
+    val counterparty: String,
+    val date: String,
+    val time: String,
+)
+
+private data class TransactionPage(
+    val transactions: List<LedgerTransaction>,
+    val nextOffset: Int,
+    val hasMore: Boolean,
 )
 
 private data class PayeeTransaction(
@@ -442,6 +466,12 @@ private fun HomeScreen(
     var dashboard by remember { mutableStateOf<Dashboard?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    var selectedCategoryFilter by rememberSaveable { mutableStateOf("All") }
+    var categoryTransactions by remember { mutableStateOf<List<LedgerTransaction>>(emptyList()) }
+    var transactionOffset by remember { mutableStateOf(0) }
+    var hasMoreTransactions by remember { mutableStateOf(false) }
+    var loadingTransactions by remember { mutableStateOf(false) }
+    var transactionError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -464,96 +494,338 @@ private fun HomeScreen(
     }
 
     LaunchedEffect(refreshKey) { refresh() }
+    suspend fun loadTransactionPage(reset: Boolean) {
+        if (loadingTransactions || (!reset && !hasMoreTransactions)) return
+        val offset = if (reset) 0 else transactionOffset
+        if (reset) {
+            categoryTransactions = emptyList()
+            transactionOffset = 0
+            hasMoreTransactions = false
+        }
+        loadingTransactions = true
+        transactionError = null
+        try {
+            val page = withContext(Dispatchers.IO) {
+                parseTransactionPage(
+                    NativeBridge.nativeCategoryTransactions(
+                        LocalDate.now().toString(),
+                        selectedCategoryFilter,
+                        offset,
+                        30,
+                    ),
+                )
+            }
+            categoryTransactions = if (reset) {
+                page.transactions
+            } else {
+                categoryTransactions + page.transactions
+            }
+            transactionOffset = page.nextOffset
+            hasMoreTransactions = page.hasMore
+        } catch (exception: Exception) {
+            transactionError = exception.message
+                ?: if (reset) "Could not load transactions." else "Could not load more transactions."
+        } finally {
+            loadingTransactions = false
+        }
+    }
 
-    Column(
+    LaunchedEffect(refreshKey, selectedCategoryFilter) {
+        loadTransactionPage(reset = true)
+    }
+
+    suspend fun loadMoreTransactions() {
+        loadTransactionPage(reset = false)
+    }
+
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        error?.let { ErrorCard(it, onRetry = ::refresh) }
+        error?.let { err ->
+            item { ErrorCard(err, onRetry = ::refresh) }
+        }
         dashboard?.let { report ->
-            SpendingSummaryCard(report)
-            BudgetOverview(context, report)
+            item { SpendingSummaryCard(report) }
+            item { BudgetOverview(context, report) }
             if (report.insights.isNotEmpty()) {
-                SectionHeading("Spending coach", "ON-DEVICE INSIGHTS")
-                CardSurface {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        report.insights.forEach { insight ->
-                            Row(verticalAlignment = Alignment.Top) {
-                                Text("✦", color = MaterialTheme.colorScheme.primary, fontSize = 18.sp)
-                                Spacer(Modifier.width(10.dp))
-                                Text(insight, color = MaterialTheme.colorScheme.onSurface)
+                item {
+                    SectionHeading("Spending coach", "ON-DEVICE INSIGHTS")
+                    CardSurface {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            report.insights.forEach { insight ->
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Text("✦", color = MaterialTheme.colorScheme.primary, fontSize = 18.sp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(insight, color = MaterialTheme.colorScheme.onSurface)
+                                }
                             }
                         }
                     }
                 }
             }
-            SectionHeading("Where it goes", "TODAY BY CATEGORY")
-            if (report.categories.isEmpty()) {
-                EmptyHint("No spending categories for today yet.")
-            } else {
-                CardSurface {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        report.categories.forEach { category ->
-                            AmountRow(
-                                category.name,
-                                "${category.count} payments",
-                                formatKsh(category.spentCents),
-                            )
-                        }
+            item {
+                SectionHeading("Where it goes", "TODAY BY CATEGORY")
+            }
+
+            // Horizontal Draggable Category Filter
+            item {
+                val filterCategories = listOf("All") + report.categories.map { it.name }
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    items(filterCategories) { cat ->
+                        FilterChip(
+                            selected = selectedCategoryFilter == cat,
+                            onClick = { selectedCategoryFilter = cat },
+                            label = { Text(cat) },
+                        )
                     }
                 }
             }
-            SectionHeading("Regulars", "TAP FOR HISTORY & LIMITS")
-            if (report.counterparties.isEmpty()) {
-                EmptyHint("Your PayBill, Pochi and other regulars will appear after M-PESA messages are captured.")
+
+            val filteredCategories = if (selectedCategoryFilter == "All") {
+                report.categories
             } else {
-                CardSurface {
-                    Column {
-                        report.counterparties.take(12).forEachIndexed { index, payee ->
-                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onCounterpartyClick(payee.name) }
-                                    .padding(vertical = 13.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(payee.name, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                                    Text(
-                                        "${payee.category} · ${payee.count} ${
-                                            if (payee.count == 1) "payment" else "payments"
-                                        }",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                                Column(horizontalAlignment = Alignment.End) {
-                                    Text(formatKsh(payee.spentCents), fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                                    if (payee.limitCents > 0) {
-                                        Text(
-                                            "Daily cap ${formatKsh(payee.limitCents)}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                report.categories.filter { it.name == selectedCategoryFilter }
+            }
+
+            if (filteredCategories.isEmpty()) {
+                item { EmptyHint("No spending categories for this filter today.") }
+            } else {
+                items(filteredCategories, key = { it.name }) { category ->
+                    EnhancedCategory3DCard(category)
+                }
+            }
+
+            item {
+                SectionHeading("Regulars", "TAP FOR HISTORY & LIMITS")
+            }
+
+            val filteredCounterparties = if (selectedCategoryFilter == "All") {
+                report.counterparties
+            } else {
+                report.counterparties.filter { it.category == selectedCategoryFilter }
+            }
+
+            if (filteredCounterparties.isEmpty()) {
+                item { EmptyHint("No regulars found for this filter.") }
+            } else {
+                items(filteredCounterparties, key = { it.name }) { payee ->
+                    RegularItemCard(payee, onCounterpartyClick)
+                }
+            }
+
+            item {
+                SectionHeading(
+                    if (selectedCategoryFilter == "All") "Today's transactions"
+                    else "$selectedCategoryFilter transactions",
+                    "FILTERED BY CATEGORY",
+                )
+            }
+            transactionError?.let { message ->
+                item {
+                    ErrorCard(message) {
+                        scope.launch { loadTransactionPage(reset = true) }
+                    }
+                }
+            }
+            if (categoryTransactions.isEmpty() && !loadingTransactions && transactionError == null) {
+                item { EmptyHint("No transactions found for this category today.") }
+            } else {
+                items(categoryTransactions, key = { it.code }) { transaction ->
+                    TransactionItemCard(transaction) {
+                        onCounterpartyClick(transaction.counterparty)
+                    }
+                }
+            }
+            if (hasMoreTransactions || loadingTransactions) {
+                item {
+                    OutlinedButton(
+                        onClick = { scope.launch { loadMoreTransactions() } },
+                        enabled = !loadingTransactions,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (loadingTransactions) "Loading…" else "Load more transactions")
                     }
                 }
             }
         }
         if (dashboard == null && !loading && error == null) {
-            EmptyHint("Your local spending insights are loading.")
+            item { EmptyHint("Your local spending insights are loading.") }
         }
         if (dashboard?.transactionCount == 0) {
-            EmptyHint("No M-PESA payments recorded today. New messages from MPESA are captured in the background.")
+            item { EmptyHint("No M-PESA payments recorded today. New messages from MPESA are captured in the background.") }
         }
-        Spacer(Modifier.height(8.dp))
+        item { Spacer(Modifier.height(8.dp)) }
+    }
+}
+
+@Composable
+private fun EnhancedCategory3DCard(category: CategorySpend) {
+    val gradientColors = when (category.name.lowercase()) {
+        "send" -> listOf(Color(0xFF146B55), Color(0xFF21A67A))
+        "receive" -> listOf(Color(0xFF087F8C), Color(0xFF36B7C4))
+        "paybill", "bills" -> listOf(Color(0xFF87521A), Color(0xFFD49A39))
+        "buygoods", "shopping" -> listOf(Color(0xFF3153A4), Color(0xFF6987E0))
+        "pochi" -> listOf(Color(0xFF7343A0), Color(0xFFAA70D5))
+        "withdrawal", "transport" -> listOf(Color(0xFFAD4C34), Color(0xFFE78357))
+        "airtime" -> listOf(Color(0xFFB05E18), Color(0xFFE5A535))
+        "food" -> listOf(Color(0xFF2E7D32), Color(0xFF66BB6A))
+        else -> listOf(Color(0xFF37474F), Color(0xFF78909C))
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(6.dp, RoundedCornerShape(24.dp)),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+    ) {
+        Box(
+            modifier = Modifier
+                .background(Brush.linearGradient(gradientColors))
+                .fillMaxWidth()
+                .padding(20.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(108.dp)
+                    .align(Alignment.CenterEnd)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.10f)),
+            )
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 14.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.08f)),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.22f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = category.name.take(1).uppercase(),
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp,
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        category.name,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "${category.count} ${if (category.count == 1) "payment" else "payments"}",
+                        color = Color.White.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        formatKsh(category.spentCents),
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    if (category.largestSpendCents > 0) {
+                        Text(
+                            "Largest: ${formatKsh(category.largestSpendCents)}",
+                            color = Color.White.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransactionItemCard(transaction: LedgerTransaction, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    transaction.counterparty,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    "${transaction.category} · ${transaction.time}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                formatKsh(transaction.amountCents),
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RegularItemCard(payee: Counterparty, onCounterpartyClick: (String) -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(2.dp, RoundedCornerShape(18.dp)),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onCounterpartyClick(payee.name) }
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(payee.name, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    "${payee.category} · ${payee.count} ${if (payee.count == 1) "payment" else "payments"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text(formatKsh(payee.spentCents), fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                if (payee.limitCents > 0) {
+                    Text(
+                        "Daily cap ${formatKsh(payee.limitCents)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -665,104 +937,106 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
     }
 
     LaunchedEffect(counterparty) { refresh() }
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        error?.let { ErrorCard(it, onRetry = ::refresh) }
+        error?.let { err ->
+            item { ErrorCard(err, onRetry = ::refresh) }
+        }
         report?.let { details ->
-            CardSurface {
-                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("TOTAL SPENT", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(formatKsh(details.totalSpentCents), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                    Text("${details.transactionCount} transactions · ${formatKsh(details.weeklyAverageCents)} average per week", color = MaterialTheme.colorScheme.onSurface)
-                }
-            }
-            SectionHeading("Spending pattern", "ALL AVAILABLE HISTORY")
-            CardSurface {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        details.busiestDay?.let { "You spend most here on $it." }
-                            ?: "No outgoing payments found for this regular yet.",
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    details.weekdaySpending.forEach { (day, amount) ->
-                        AmountRow(day, "weekday total", formatKsh(amount))
-                    }
-                }
-            }
-            SectionHeading("Category & limit", "CAP IS PER DAY")
-            CardSurface {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Assign a category", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-                    CategoryPicker(category) { category = it }
-                    OutlinedTextField(
-                        value = limitAmount,
-                        onValueChange = { limitAmount = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Daily alert limit (Ksh)") },
-                        supportingText = { Text("Leave blank to turn off this payee's daily alert.") },
-                        singleLine = true,
-                    )
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                saving = true
-                                error = null
-                                try {
-                                    val cents = parseCents(limitAmount) ?: 0L
-                                    check(cents >= 0) { "Enter a valid non-negative Ksh amount." }
-                                    check(withContext(Dispatchers.IO) {
-                                        NativeBridge.nativeSetCounterpartySettings(
-                                            counterparty,
-                                            category,
-                                            cents,
-                                        )
-                                    }) { "Could not save this payee's settings." }
-                                    onSaved()
-                                    refresh()
-                                } catch (exception: Exception) {
-                                    error = exception.message ?: "Could not save the limit."
-                                } finally {
-                                    saving = false
-                                }
-                            }
-                        },
-                        enabled = !saving,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    ) {
-                        Text(if (saving) "Saving…" else "Save category and limit")
-                    }
-                }
-            }
-            SectionHeading("Transactions", "NEWEST FIRST")
-            if (details.transactions.isEmpty()) {
-                EmptyHint("There are no parsed transactions for this regular yet.")
-            } else {
+            item {
                 CardSurface {
-                    Column {
-                        details.transactions.forEachIndexed { index, transaction ->
-                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 12.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp),
-                            ) {
-                                AmountRow(
-                                    transaction.category,
-                                    "${transaction.date} · ${transaction.time}",
-                                    formatKsh(transaction.amountCents),
-                                )
-                                Text(
-                                    "${transaction.kind.replaceFirstChar { it.uppercase() }} · ${transaction.code}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Text("TOTAL SPENT", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(formatKsh(details.totalSpentCents), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("${details.transactionCount} transactions · ${formatKsh(details.weeklyAverageCents)} average per week", color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+            }
+            item { SectionHeading("Spending pattern", "ALL AVAILABLE HISTORY") }
+            item {
+                CardSurface {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            details.busiestDay?.let { "You spend most here on $it." }
+                                ?: "No outgoing payments found for this regular yet.",
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        details.weekdaySpending.forEach { (day, amount) ->
+                            AmountRow(day, "weekday total", formatKsh(amount))
+                        }
+                    }
+                }
+            }
+            item { SectionHeading("Category & limit", "CAP IS PER DAY") }
+            item {
+                CardSurface {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Assign a category", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                        CategoryPicker(category) { category = it }
+                        OutlinedTextField(
+                            value = limitAmount,
+                            onValueChange = { limitAmount = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Daily alert limit (Ksh)") },
+                            supportingText = { Text("Leave blank to turn off this payee's daily alert.") },
+                            singleLine = true,
+                        )
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    saving = true
+                                    error = null
+                                    try {
+                                        val cents = parseCents(limitAmount) ?: 0L
+                                        check(cents >= 0) { "Enter a valid non-negative Ksh amount." }
+                                        check(withContext(Dispatchers.IO) {
+                                            NativeBridge.nativeSetCounterpartySettings(
+                                                counterparty,
+                                                category,
+                                                cents,
+                                            )
+                                        }) { "Could not save this payee's settings." }
+                                        onSaved()
+                                        refresh()
+                                    } catch (exception: Exception) {
+                                        error = exception.message ?: "Could not save the limit."
+                                    } finally {
+                                        saving = false
+                                    }
+                                }
+                            },
+                            enabled = !saving,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        ) {
+                            Text(if (saving) "Saving…" else "Save category and limit")
+                        }
+                    }
+                }
+            }
+            item { SectionHeading("Transactions", "NEWEST FIRST") }
+            if (details.transactions.isEmpty()) {
+                item { EmptyHint("There are no parsed transactions for this regular yet.") }
+            } else {
+                items(details.transactions, key = { it.code }) { transaction ->
+                    CardSurface {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            AmountRow(
+                                transaction.category,
+                                "${transaction.date} · ${transaction.time}",
+                                formatKsh(transaction.amountCents),
+                            )
+                            Text(
+                                "${transaction.kind.replaceFirstChar { it.uppercase() }} · ${transaction.code}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -835,137 +1109,146 @@ private fun SettingsScreen(
     }
     var status by remember { mutableStateOf<String?>(null) }
 
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        SettingsGroup("APPEARANCE & THEME") {
-            Text("App Theme", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("system" to "System", "light" to "Light", "dark" to "Dark").forEach { (mode, label) ->
-                    FilterChip(
-                        selected = themeMode == mode,
-                        onClick = { onThemeChange(mode) },
-                        label = { Text(label) },
-                    )
-                }
-            }
-            Text(
-                "Choose between system default, light, or dark mode.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        SettingsGroup("BACKGROUND CAPTURE") {
-            SettingsStatusRow(
-                "M-PESA SMS access",
-                if (smsAllowed) "Enabled · MPESA sender only" else "Permission required",
-            )
-            Text(
-                "Only messages broadcast by sender MPESA are queued. Message contents and the ledger remain on this device.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Button(
-                onClick = if (smsAllowed) openAppSettings else onRequestSms,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) {
-                Text(if (smsAllowed) "Review app permissions" else "Allow SMS capture")
-            }
-            if (!smsAllowed) {
-                OutlinedButton(onClick = openAppSettings) {
-                    Text("Open app settings if Android blocks this permission")
-                }
-            }
-        }
-        SettingsGroup("SPENDING CHECK-INS") {
-            Text("Notify me", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
-            val intervals = listOf(
-                1 to "1 hour",
-                2 to "2 hours",
-                3 to "3 hours",
-                24 to "Daily",
-                168 to "Weekly",
-            )
-            intervals.chunked(3).forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    row.forEach { (hours, label) ->
+        item {
+            SettingsGroup("APPEARANCE & THEME") {
+                Text("App Theme", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("system" to "System", "light" to "Light", "dark" to "Dark").forEach { (mode, label) ->
                         FilterChip(
-                            selected = interval == hours,
-                            onClick = { interval = hours },
+                            selected = themeMode == mode,
+                            onClick = { onThemeChange(mode) },
                             label = { Text(label) },
                         )
                     }
                 }
+                Text(
+                    "Choose between system default, light, or dark mode.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
-            Text(
-                "Android schedules background work inexactly and may defer a check to save battery.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            SettingsStatusRow(
-                "Notifications",
-                if (notificationsAllowed) "Enabled" else "Permission required",
-            )
-            if (!notificationsAllowed) {
-                OutlinedButton(onClick = onRequestNotifications) {
-                    Text("Allow notifications")
+        }
+        item {
+            SettingsGroup("BACKGROUND CAPTURE") {
+                SettingsStatusRow(
+                    "M-PESA SMS access",
+                    if (smsAllowed) "Enabled · MPESA sender only" else "Permission required",
+                )
+                Text(
+                    "Only messages broadcast by sender MPESA are queued. Message contents and the ledger remain on this device.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    onClick = if (smsAllowed) openAppSettings else onRequestSms,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                ) {
+                    Text(if (smsAllowed) "Review app permissions" else "Allow SMS capture")
+                }
+                if (!smsAllowed) {
+                    OutlinedButton(onClick = openAppSettings) {
+                        Text("Open app settings if Android blocks this permission")
+                    }
                 }
             }
         }
-        SettingsGroup("BUDGETS") {
-            OutlinedTextField(
-                value = dailyBudget,
-                onValueChange = { dailyBudget = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Daily budget (Ksh)") },
-                singleLine = true,
-            )
-            OutlinedTextField(
-                value = weeklyBudget,
-                onValueChange = { weeklyBudget = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Weekly budget (Ksh)") },
-                singleLine = true,
-            )
-            Button(
-                onClick = {
-                    val daily = parseCents(dailyBudget)
-                    val weekly = parseCents(weeklyBudget)
-                    if (daily == null || weekly == null) {
-                        status = "Enter valid non-negative amounts for both budgets."
-                    } else {
-                        preferences.edit()
-                            .putLong("daily_budget_cents", daily)
-                            .putLong("weekly_budget_cents", weekly)
-                            .apply()
-                        try {
-                            scheduleSpendingNotifications(context, interval)
-                            status = "Budgets and check-in schedule saved."
-                        } catch (exception: IllegalArgumentException) {
-                            status = "Could not schedule the selected reminder: ${exception.message}"
+        item {
+            SettingsGroup("SPENDING CHECK-INS") {
+                Text("Notify me", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                val intervals = listOf(
+                    1 to "1 hour",
+                    2 to "2 hours",
+                    3 to "3 hours",
+                    24 to "Daily",
+                    168 to "Weekly",
+                )
+                intervals.chunked(3).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        row.forEach { (hours, label) ->
+                            FilterChip(
+                                selected = interval == hours,
+                                onClick = { interval = hours },
+                                label = { Text(label) },
+                            )
                         }
                     }
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) {
-                Text("Save budgets and schedule")
+                }
+                Text(
+                    "Android schedules background work inexactly and may defer a check to save battery.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                SettingsStatusRow(
+                    "Notifications",
+                    if (notificationsAllowed) "Enabled" else "Permission required",
+                )
+                if (!notificationsAllowed) {
+                    OutlinedButton(onClick = onRequestNotifications) {
+                        Text("Allow notifications")
+                    }
+                }
             }
-            status?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
         }
-        SettingsGroup("YOUR DATA") {
-            SettingsStatusRow("Database", "Private on-device SQLite")
-            SettingsStatusRow("Background jobs", "Apalis queue supervised by Rivium")
-            Text(
-                "M-PESA messages are retained locally to parse and review. Notifications are generated on the device; no external AI or financial service is contacted.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
+        item {
+            SettingsGroup("BUDGETS") {
+                OutlinedTextField(
+                    value = dailyBudget,
+                    onValueChange = { dailyBudget = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Daily budget (Ksh)") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = weeklyBudget,
+                    onValueChange = { weeklyBudget = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Weekly budget (Ksh)") },
+                    singleLine = true,
+                )
+                Button(
+                    onClick = {
+                        val daily = parseCents(dailyBudget)
+                        val weekly = parseCents(weeklyBudget)
+                        if (daily == null || weekly == null) {
+                            status = "Enter valid non-negative amounts for both budgets."
+                        } else {
+                            preferences.edit()
+                                .putLong("daily_budget_cents", daily)
+                                .putLong("weekly_budget_cents", weekly)
+                                .apply()
+                            try {
+                                scheduleSpendingNotifications(context, interval)
+                                status = "Budgets and check-in schedule saved."
+                            } catch (exception: IllegalArgumentException) {
+                                status = "Could not schedule the selected reminder: ${exception.message}"
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                ) {
+                    Text("Save budgets and schedule")
+                }
+                status?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
+            }
         }
-        Spacer(Modifier.height(8.dp))
+        item {
+            SettingsGroup("YOUR DATA") {
+                SettingsStatusRow("Database", "Private on-device SQLite")
+                SettingsStatusRow("Background jobs", "Apalis queue supervised by Rivium")
+                Text(
+                    "M-PESA messages are retained locally to parse and review. Notifications are generated on the device; no external AI or financial service is contacted.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        item { Spacer(Modifier.height(8.dp)) }
     }
 }
 
@@ -1070,9 +1353,10 @@ private fun parseDashboard(encoded: String): Dashboard {
         weeklySpentCents = json.optLong("weekly_spent_cents"),
         categories = json.array("categories") { item ->
             CategorySpend(
-                item.optString("name"),
-                item.optLong("spent_cents"),
-                item.optInt("count"),
+                name = item.optString("name"),
+                spentCents = item.optLong("spent_cents"),
+                count = item.optInt("count"),
+                largestSpendCents = item.optLong("largest_spend_cents", item.optLong("spent_cents")),
             )
         },
         counterparties = json.array("counterparties") { item ->
@@ -1087,6 +1371,24 @@ private fun parseDashboard(encoded: String): Dashboard {
             )
         },
         insights = json.stringArray("insights"),
+    )
+}
+
+private fun parseTransactionPage(encoded: String): TransactionPage {
+    val json = JSONObject(encoded)
+    return TransactionPage(
+        transactions = json.array("transactions") { item ->
+            LedgerTransaction(
+                code = item.optString("code"),
+                category = item.optString("category"),
+                amountCents = item.optLong("amount_cents"),
+                counterparty = item.optString("counterparty"),
+                date = item.optString("date"),
+                time = item.optString("time"),
+            )
+        },
+        nextOffset = json.optInt("next_offset"),
+        hasMore = json.optBoolean("has_more"),
     )
 }
 
