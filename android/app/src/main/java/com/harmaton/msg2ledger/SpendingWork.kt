@@ -29,6 +29,7 @@ private const val LEDGER_DB = "ledger.db"
 private const val NOTIFICATION_CHANNEL = "spending_checkins"
 private const val NOTIFICATION_WORK = "spending-checkins"
 const val PREFERENCES = "spending_preferences"
+private val embeddedHostStartLock = Any()
 
 class SmsIngestWorker(
     context: Context,
@@ -129,15 +130,55 @@ private fun queueImmediateBudgetAlert(context: Context) {
     )
 }
 
-private fun openLedgerAndStartHost(context: Context) {
+internal fun openLedgerAndStartHost(context: Context) {
     val database = context.getDatabasePath(LEDGER_DB)
     database.parentFile?.mkdirs()
     check(NativeBridge.nativeOpen(database.absolutePath)) {
         "Could not open the on-device ledger database"
     }
-    val status = NativeHost.nativeStart(arrayOf("--root", database.parent))
-    check(status == 0 || status == 1) {
-        "Could not start the background ledger service (code $status)"
+    ensureLedgerHostStarted(
+        database.parentFile?.absolutePath
+            ?: error("The private ledger database has no parent directory."),
+    )
+}
+
+internal fun ensureLedgerHostStarted(rootPath: String) {
+    synchronized(embeddedHostStartLock) {
+        var status = NativeHost.nativeStatus()
+        if (status == 5) {
+            Thread.sleep(5_000)
+            status = NativeHost.nativeStatus()
+        }
+        when (status) {
+                1, 2 -> return
+                3, 4 -> {
+                    repeat(100) {
+                        Thread.sleep(50)
+                        when (NativeHost.nativeStatus()) {
+                            1, 2 -> return
+                            0, 5 -> {
+                                startLedgerHost(rootPath)
+                                return
+                            }
+                        }
+                    }
+                    error("The background ledger service did not finish starting or stopping in time.")
+                }
+                0, 5 -> {
+                    startLedgerHost(rootPath)
+                    return
+                }
+                else -> error("The background ledger service returned an unknown status: $status")
+        }
+    }
+}
+
+private fun startLedgerHost(rootPath: String) {
+    val result = NativeHost.nativeStart(arrayOf("--root", rootPath))
+    check(result == 0 || result == 1) {
+        NativeHost.nativeLastError().ifBlank {
+            "Could not start the background ledger service (code $result)."
+        }
     }
 }
 

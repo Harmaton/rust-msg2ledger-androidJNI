@@ -1,5 +1,7 @@
 use apalis::prelude::*;
-use apalis_sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteStorage};
+use apalis_sqlite::{
+    Config as ApalisConfig, SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteStorage,
+};
 use chrono::{Datelike, NaiveDate};
 use jni::{
     JNIEnv,
@@ -58,6 +60,16 @@ struct IncomingMessage {
     database_path: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct StatementRow {
+    pub date: String,
+    pub time: String,
+    pub kind: String,
+    pub amount_cents: i64,
+    pub description: String,
+    pub reference: String,
+}
+
 pub struct LedgerApplication;
 
 impl App for LedgerApplication {
@@ -80,7 +92,9 @@ impl App for LedgerApplication {
                 SqliteStorage::<()>::setup(&pool)
                     .await
                     .map_err(|error| rivium::Error::internal(error.to_string()))?;
-                let backend = SqliteStorage::<IncomingMessage>::new(&pool);
+                let backend = SqliteStorage::<IncomingMessage>::new(&pool).with_config(
+                    ApalisConfig::default().heartbeat_interval(Duration::from_secs(5)),
+                );
                 let worker = WorkerBuilder::new("mpesa-message-worker")
                     .backend(backend)
                     .retry(RetryPolicy::retries(3))
@@ -448,6 +462,123 @@ pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeCounterpa
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeAttachTransactionToPaybill(
+    mut env: JNIEnv,
+    _class: JObject,
+    code: JString,
+    paybill: JString,
+) -> jboolean {
+    let result = (|| {
+        let code = java_string(&mut env, code)?;
+        let paybill = java_string(&mut env, paybill)?;
+        let slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_ref()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        store
+            .attach_transaction_to_paybill(&code, &paybill)
+            .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(()) => JNI_TRUE,
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            JNI_FALSE
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeTrackedPaybills(
+    mut env: JNIEnv,
+    _class: JObject,
+) -> jstring {
+    let result = (|| {
+        let slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_ref()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        store
+            .tracked_paybills()
+            .map(|value| value.to_string())
+            .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(value) => return_java_string(&mut env, &value),
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeImportStatement(
+    mut env: JNIEnv,
+    _class: JObject,
+    institution: JString,
+    rows_json: JString,
+) -> jstring {
+    let result = (|| {
+        let institution = java_string(&mut env, institution)?;
+        let rows_json = java_string(&mut env, rows_json)?;
+        let rows: Vec<StatementRow> = serde_json::from_str(&rows_json)
+            .map_err(|error| format!("invalid statement data: {error}"))?;
+        let slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_ref()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        store
+            .import_statement(&institution, rows)
+            .map(|count| json!({"imported_count": count}).to_string())
+            .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(value) => return_java_string(&mut env, &value),
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeInstitutionReport(
+    mut env: JNIEnv,
+    _class: JObject,
+) -> jstring {
+    let result = (|| {
+        let slot = store_slot()
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_string())?;
+        let store = slot
+            .as_ref()
+            .ok_or_else(|| "database is not open; call open first".to_string())?;
+        store
+            .institution_report()
+            .map(|value| value.to_string())
+            .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(value) => return_java_string(&mut env, &value),
+        Err(error) => {
+            throw_java_error(&mut env, error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_harmaton_msg2ledger_NativeBridge_nativeSetCounterpartySettings(
     mut env: JNIEnv,
     _class: JObject,
@@ -534,6 +665,26 @@ impl MessageStore {
                 counterparty TEXT PRIMARY KEY,
                 category TEXT NOT NULL,
                 limit_cents INTEGER CHECK(limit_cents IS NULL OR limit_cents > 0)
+            );
+            CREATE TABLE IF NOT EXISTS tracked_paybills (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE
+            );
+            CREATE TABLE IF NOT EXISTS transaction_paybills (
+                transaction_code TEXT PRIMARY KEY REFERENCES transactions(code) ON DELETE CASCADE,
+                tracked_paybill_id INTEGER NOT NULL REFERENCES tracked_paybills(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS institution_transactions (
+                id INTEGER PRIMARY KEY,
+                institution TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                external_reference TEXT,
+                kind TEXT NOT NULL CHECK(kind IN ('sent', 'received')),
+                amount_cents INTEGER NOT NULL CHECK(amount_cents >= 0),
+                description TEXT NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                UNIQUE(institution, dedupe_key)
             );
             ",
         )?;
@@ -658,6 +809,228 @@ impl MessageStore {
         Ok(())
     }
 
+    pub fn attach_transaction_to_paybill(&self, code: &str, paybill: &str) -> rusqlite::Result<()> {
+        let paybill = paybill.trim();
+        if paybill.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "paybill name must not be empty".to_string(),
+            ));
+        }
+        let is_outgoing: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE code = ?1 AND kind = 'sent')",
+            [code],
+            |row| row.get(0),
+        )?;
+        if !is_outgoing {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "only outgoing payments can be linked as contributions".to_string(),
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO tracked_paybills(name) VALUES (?1)
+             ON CONFLICT(name) DO NOTHING",
+            [paybill],
+        )?;
+        let paybill_id = transaction.query_row(
+            "SELECT id FROM tracked_paybills WHERE name = ?1 COLLATE NOCASE",
+            [paybill],
+            |row| row.get::<_, i64>(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO transaction_paybills(transaction_code, tracked_paybill_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(transaction_code) DO UPDATE SET
+                 tracked_paybill_id = excluded.tracked_paybill_id",
+            params![code, paybill_id],
+        )?;
+        transaction.commit()
+    }
+
+    pub fn tracked_paybills(&self) -> rusqlite::Result<Value> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.name, t.code, t.kind, t.category, t.amount_cents, t.counterparty, t.date, t.time
+             FROM tracked_paybills p
+             JOIN transaction_paybills link ON link.tracked_paybill_id = p.id
+             JOIN transactions t ON t.code = link.transaction_code
+             ORDER BY p.name COLLATE NOCASE, t.date DESC, t.time DESC, t.code DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                json!({
+                    "code": row.get::<_, String>(1)?,
+                    "kind": row.get::<_, String>(2)?,
+                    "category": row.get::<_, String>(3)?,
+                    "amount_cents": row.get::<_, i64>(4)?,
+                    "counterparty": row.get::<_, String>(5)?,
+                    "date": row.get::<_, String>(6)?,
+                    "time": row.get::<_, String>(7)?,
+                }),
+            ))
+        })?;
+        let mut paybills = std::collections::BTreeMap::<String, Vec<Value>>::new();
+        for row in rows {
+            let (name, transaction) = row?;
+            paybills.entry(name).or_default().push(transaction);
+        }
+        let entities: Vec<Value> = paybills
+            .into_iter()
+            .map(|(name, transactions)| {
+                let amount_cents = transactions
+                    .iter()
+                    .filter_map(|transaction| transaction["amount_cents"].as_i64())
+                    .sum::<i64>();
+                json!({
+                    "name": name,
+                    "transaction_count": transactions.len(),
+                    "amount_cents": amount_cents,
+                    "transactions": transactions,
+                })
+            })
+            .collect();
+        Ok(json!({ "paybills": entities }))
+    }
+
+    pub fn import_statement(
+        &self,
+        institution: &str,
+        rows: Vec<StatementRow>,
+    ) -> rusqlite::Result<usize> {
+        const INSTITUTIONS: &[&str] = &["NCBA", "I&M Bank", "Co-op Bank", "KCB"];
+        if !INSTITUTIONS.contains(&institution) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "unsupported institution: {institution}"
+            )));
+        }
+        if rows.len() > 50_000 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "statement import is limited to 50,000 rows".to_string(),
+            ));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut inserted = 0;
+        for row in rows {
+            if row.date.trim().is_empty()
+                || row.kind != "sent" && row.kind != "received"
+                || row.amount_cents < 0
+                || row.description.trim().is_empty()
+            {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "statement rows need a date, description, non-negative amount and sent/received direction"
+                        .to_string(),
+                ));
+            }
+            let reference = row.reference.trim();
+            let dedupe_key = if reference.is_empty() {
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    row.date.trim(),
+                    row.time.trim(),
+                    row.kind,
+                    row.amount_cents,
+                    row.description.trim().to_ascii_lowercase(),
+                )
+            } else {
+                format!("ref:{}", reference.to_ascii_uppercase())
+            };
+            inserted += transaction.execute(
+                "INSERT INTO institution_transactions
+                    (institution, dedupe_key, external_reference, kind, amount_cents, description, date, time)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(institution, dedupe_key) DO NOTHING",
+                params![
+                    institution,
+                    dedupe_key,
+                    (!reference.is_empty()).then_some(reference),
+                    row.kind,
+                    row.amount_cents,
+                    row.description.trim(),
+                    row.date.trim(),
+                    row.time.trim(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn institution_report(&self) -> rusqlite::Result<Value> {
+        let mut totals = std::collections::BTreeMap::<String, (i64, i64, Vec<Value>)>::new();
+        for transaction in self.transactions()? {
+            let entry = totals.entry("M-PESA".to_string()).or_default();
+            match transaction.kind {
+                Kind::Sent => entry.0 += transaction.amount_cents,
+                Kind::Received => entry.1 += transaction.amount_cents,
+            }
+            entry.2.push(json!({
+                "code": transaction.code,
+                "kind": kind_name(&transaction.kind),
+                "category": category_name(transaction.category),
+                "amount_cents": transaction.amount_cents,
+                "counterparty": transaction.counterparty,
+                "date": transaction.date,
+                "time": transaction.time,
+            }));
+        }
+
+        let mut statement = self.connection.prepare(
+            "SELECT institution, dedupe_key, kind, amount_cents, description, date, time
+             FROM institution_transactions
+             ORDER BY institution COLLATE NOCASE, date DESC, time DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        for row in rows {
+            let (institution, code, kind, amount_cents, description, date, time) = row?;
+            let entry = totals.entry(institution).or_default();
+            if kind == "sent" {
+                entry.0 += amount_cents;
+            } else {
+                entry.1 += amount_cents;
+            }
+            entry.2.push(json!({
+                "code": code,
+                "kind": kind,
+                "category": "Bank transfer",
+                "amount_cents": amount_cents,
+                "counterparty": description,
+                "date": date,
+                "time": time,
+            }));
+        }
+
+        let mut institutions: Vec<Value> = totals
+            .into_iter()
+            .map(|(name, (sent_cents, received_cents, transactions))| {
+                json!({
+                    "name": name,
+                    "sent_cents": sent_cents,
+                    "received_cents": received_cents,
+                    "total_cents": sent_cents + received_cents,
+                    "transaction_count": transactions.len(),
+                    "transactions": transactions,
+                })
+            })
+            .collect();
+        institutions.sort_by(|left, right| {
+            right["total_cents"]
+                .as_i64()
+                .cmp(&left["total_cents"].as_i64())
+                .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
+        });
+        Ok(json!({ "institutions": institutions }))
+    }
+
     pub fn dashboard(&self, day: NaiveDate) -> rusqlite::Result<Value> {
         let transactions = self.transactions()?;
         let summary = summarize_day(&transactions, day);
@@ -689,6 +1062,23 @@ impl MessageStore {
                     Kind::Received => weekly_received_cents += transaction.amount_cents,
                 }
             }
+            let occurred_today = transaction
+                .occurred_at()
+                .is_some_and(|occurred_at| occurred_at.date() == day);
+            if occurred_today {
+                let (category, _) = if transaction.kind == Kind::Sent {
+                    settings
+                        .get(&transaction.counterparty)
+                        .cloned()
+                        .unwrap_or_else(|| (category_name(transaction.category).to_string(), None))
+                } else {
+                    (category_name(transaction.category).to_string(), None)
+                };
+                let category_total = categories.entry(category).or_default();
+                category_total.0 += transaction.amount_cents;
+                category_total.1 += 1;
+                category_total.2 = category_total.2.max(transaction.amount_cents);
+            }
             if transaction.kind != Kind::Sent {
                 continue;
             }
@@ -698,18 +1088,11 @@ impl MessageStore {
                 .unwrap_or_else(|| (category_name(transaction.category).to_string(), None));
             let party = counterparties
                 .entry(transaction.counterparty.clone())
-                .or_insert_with(|| (0, 0, category.clone(), limit, 0, 0));
+                .or_insert_with(|| (0, 0, category, limit, 0, 0));
             party.0 += transaction.amount_cents;
             party.1 += 1;
-            let occurred_today = transaction
-                .occurred_at()
-                .is_some_and(|occurred_at| occurred_at.date() == day);
             if occurred_today {
                 party.4 += transaction.amount_cents;
-                let category_total = categories.entry(category).or_default();
-                category_total.0 += transaction.amount_cents;
-                category_total.1 += 1;
-                category_total.2 = category_total.2.max(transaction.amount_cents);
             }
             if occurred_date.is_some_and(|date| (week_start..=day).contains(&date)) {
                 party.5 += transaction.amount_cents;
@@ -820,13 +1203,17 @@ impl MessageStore {
             .into_iter()
             .filter_map(|transaction| {
                 let occurred_at = transaction.occurred_at()?;
-                if occurred_at.date() != day || transaction.kind != Kind::Sent {
+                if occurred_at.date() != day {
                     return None;
                 }
-                let transaction_category = settings.get(&transaction.counterparty).map_or_else(
-                    || category_name(transaction.category).to_string(),
-                    |(value, _)| value.clone(),
-                );
+                let transaction_category = if transaction.kind == Kind::Sent {
+                    settings.get(&transaction.counterparty).map_or_else(
+                        || category_name(transaction.category).to_string(),
+                        |(value, _)| value.clone(),
+                    )
+                } else {
+                    category_name(transaction.category).to_string()
+                };
                 if category.is_some_and(|filter| filter != transaction_category) {
                     return None;
                 }
@@ -835,6 +1222,7 @@ impl MessageStore {
                     transaction.code.clone(),
                     json!({
                         "code": transaction.code,
+                        "kind": kind_name(&transaction.kind),
                         "category": transaction_category,
                         "amount_cents": transaction.amount_cents,
                         "counterparty": transaction.counterparty,
@@ -1139,8 +1527,9 @@ mod tests {
         assert_eq!(report["transaction_count"], 2);
         assert_eq!(report["weekly_spent_cents"], 50_000);
         assert_eq!(report["counterparties"][0]["name"], "JOHN DOE 0712345678");
-        assert_eq!(report["categories"][0]["name"], "Send");
-        assert_eq!(report["categories"][0]["largest_spend_cents"], 50_000);
+        assert_eq!(report["categories"][0]["name"], "Receive");
+        assert_eq!(report["categories"][0]["largest_spend_cents"], 100_000);
+        assert_eq!(report["categories"][1]["name"], "Send");
 
         store
             .set_counterparty_settings("JOHN DOE 0712345678", "Shopping", 30_000)
@@ -1171,6 +1560,12 @@ mod tests {
                 "QGH7SML456 Confirmed. Ksh100.00 sent to SMALL SHOP on 12/3/26 at 1:15 PM.",
             )
             .unwrap();
+        store
+            .ingest_message(
+                "MPESA",
+                "QGH7INC456 Confirmed. You have received Ksh80.00 from ALICE on 12/3/26 at 12:15 PM.",
+            )
+            .unwrap();
         let day = NaiveDate::from_ymd_opt(2026, 3, 12).unwrap();
         let dashboard = store.dashboard(day).unwrap();
         assert_eq!(dashboard["categories"][0]["name"], "Send");
@@ -1190,9 +1585,74 @@ mod tests {
         assert_eq!(second_page["transactions"][0]["amount_cents"], 10_000);
         assert_eq!(second_page["has_more"], false);
 
+        let received = store
+            .category_transactions(day, Some("Receive"), 0, 1)
+            .unwrap();
+        assert_eq!(received["transactions"][0]["kind"], "received");
+
         let all_categories = store.category_transactions(day, None, 0, 1).unwrap();
         assert_eq!(all_categories["transactions"].as_array().unwrap().len(), 1);
         assert_eq!(all_categories["has_more"], true);
+    }
+
+    #[test]
+    fn transactions_can_be_grouped_under_a_named_paybill() {
+        let mut store = MessageStore::in_memory().unwrap();
+        store.ingest_message("MPESA", SENT).unwrap();
+        store
+            .attach_transaction_to_paybill("QGH7XYZ123", " Ndechu ")
+            .unwrap();
+        let report = store.tracked_paybills().unwrap();
+        assert_eq!(report["paybills"][0]["name"], "Ndechu");
+        assert_eq!(report["paybills"][0]["transaction_count"], 1);
+        assert_eq!(report["paybills"][0]["amount_cents"], 50_000);
+
+        assert!(
+            store
+                .attach_transaction_to_paybill("UNKNOWN", "Ndechu")
+                .is_err()
+        );
+        assert!(
+            store
+                .attach_transaction_to_paybill("QGH7XYZ123", "   ")
+                .is_err()
+        );
+        assert!(
+            store
+                .attach_transaction_to_paybill("QGH7ABC456", "Ndechu")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bank_statement_import_is_idempotent_and_ranked_separately_from_mpesa() {
+        let mut store = MessageStore::in_memory().unwrap();
+        store.ingest_message("MPESA", SENT).unwrap();
+        let rows = vec![
+            StatementRow {
+                date: "29/10/26".to_string(),
+                time: "09:30".to_string(),
+                kind: "sent".to_string(),
+                amount_cents: 25_000,
+                description: "Ndechu PayBill".to_string(),
+                reference: "NCBA-001".to_string(),
+            },
+            StatementRow {
+                date: "29/10/26".to_string(),
+                time: "10:00".to_string(),
+                kind: "received".to_string(),
+                amount_cents: 10_000,
+                description: "Salary".to_string(),
+                reference: String::new(),
+            },
+        ];
+        assert_eq!(store.import_statement("NCBA", rows.clone()).unwrap(), 2);
+        assert_eq!(store.import_statement("NCBA", rows).unwrap(), 0);
+        let report = store.institution_report().unwrap();
+        assert_eq!(report["institutions"][0]["name"], "M-PESA");
+        assert_eq!(report["institutions"][1]["name"], "NCBA");
+        assert_eq!(report["institutions"][1]["total_cents"], 35_000);
+        assert_eq!(report["institutions"][1]["transaction_count"], 2);
     }
 
     #[test]

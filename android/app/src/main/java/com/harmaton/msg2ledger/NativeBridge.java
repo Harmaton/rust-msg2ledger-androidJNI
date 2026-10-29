@@ -16,6 +16,10 @@ public final class NativeBridge {
     public static native String nativeCategoryTransactions(
             String date, String category, int offset, int limit);
     public static native String nativeCounterpartyDetail(String counterparty);
+    public static native boolean nativeAttachTransactionToPaybill(String code, String paybill);
+    public static native String nativeTrackedPaybills();
+    public static native String nativeInstitutionReport();
+    public static native String nativeImportStatement(String institution, String rowsJson);
     public static native boolean nativeSetCounterpartySettings(
             String counterparty, String category, long limitCents);
 }

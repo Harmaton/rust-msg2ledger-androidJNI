@@ -68,6 +68,38 @@ budgets, notification frequency and Android permissions are configurable in
 Settings. The “spending coach” is deterministic rule-based logic; no message or
 financial data is sent to an AI service.
 
+Outgoing transactions can be linked to a named PayBill group, for example
+“Ndechu”. This is an additional local association; it does not change the
+transaction's original category or payment details. Review linked payments
+under Settings → Tracked PayBills.
+
+The Institutions tab keeps M-PESA as the default and ranks M-PESA, NCBA, I&M
+Bank, Co-op Bank and KCB by total amount across the available history. Bank
+statement CSV imports are local and deduplicated by reference (or by the row
+contents when a reference is absent). Use headers `date,description,amount,type`
+and optionally `time,reference`; `type` accepts debit/credit or sent/received.
+Bank SMS adapters are not enabled yet because formats vary by institution; the
+existing M-PESA SMS receiver remains MPESA-only and unchanged.
+
+The Profile screen supports Firebase email/password and Google sign-in once
+configured. Authentication is for the account identity only; it does not sync
+the on-device ledger. To enable it, create a Firebase Android app for
+`com.harmaton.msg2ledger`, enable Email/Password and Google providers, register
+the app's signing certificate fingerprints with Firebase, and put the following
+values in your user-level `~/.gradle/gradle.properties` (do not commit them):
+
+```properties
+firebaseApiKey=YOUR_FIREBASE_API_KEY
+firebaseAppId=YOUR_FIREBASE_ANDROID_APP_ID
+firebaseProjectId=YOUR_FIREBASE_PROJECT_ID
+firebaseSenderId=YOUR_FIREBASE_SENDER_ID
+firebaseWebClientId=YOUR_FIREBASE_WEB_OAUTH_CLIENT_ID
+```
+
+Rebuild after adding the values. Email/password authentication needs the first
+four values; Google sign-in also needs the web client ID. The Payments screen
+is a placeholder: there is no billing SDK, subscription, or trial enabled yet.
+
 The Android launcher uses the adaptive launcher icon resources under
 `android/app/src/main/res`; reinstalling is not normally required after
 updating the installed app with a newly built APK.
