@@ -12,8 +12,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.graphics.ExperimentalAnimationGraphicsApi
+import androidx.compose.animation.graphics.res.animatedVectorResource
+import androidx.compose.animation.graphics.res.rememberAnimatedVectorPainter
+import androidx.compose.animation.graphics.vector.AnimatedImageVector
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +58,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,6 +85,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -85,23 +94,42 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private object AppColors {
-    val Ink = Color(0xFF14251F)
-    val Muted = Color(0xFF73817A)
-    val Green = Color(0xFF167A55)
-    val Mint = Color(0xFFDDF4E9)
-    val Canvas = Color(0xFFF5F7F4)
-    val Card = Color.White
-    val Orange = Color(0xFFE9A446)
-    val Red = Color(0xFFB63E34)
-}
-
 private object Routes {
     const val Splash = "splash"
     const val Home = "home"
     const val Settings = "settings"
     const val Detail = "detail"
 }
+
+private val LightColors = lightColorScheme(
+    primary = Color(0xFF167A55),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFDDF4E9),
+    onPrimaryContainer = Color(0xFF0C422E),
+    background = Color(0xFFF5F7F4),
+    onBackground = Color(0xFF14251F),
+    surface = Color.White,
+    onSurface = Color(0xFF14251F),
+    surfaceVariant = Color(0xFFEBEFEB),
+    onSurfaceVariant = Color(0xFF73817A),
+    outline = Color(0xFF73817A),
+    error = Color(0xFFB63E34),
+)
+
+private val DarkColors = darkColorScheme(
+    primary = Color(0xFF23A072),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF0C422E),
+    onPrimaryContainer = Color(0xFFDDF4E9),
+    background = Color(0xFF0F1412),
+    onBackground = Color(0xFFE2E8E4),
+    surface = Color(0xFF161C19),
+    onSurface = Color(0xFFE2E8E4),
+    surfaceVariant = Color(0xFF222B27),
+    onSurfaceVariant = Color(0xFF9AA8A2),
+    outline = Color(0xFF73817A),
+    error = Color(0xFFE57368),
+)
 
 private data class CategorySpend(val name: String, val spentCents: Long, val count: Int)
 
@@ -150,8 +178,28 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            val context = LocalContext.current
+            val preferences = remember {
+                context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            }
+            var themeMode by rememberSaveable {
+                mutableStateOf(preferences.getString("theme_mode", "system") ?: "system")
+            }
+            val darkTheme = when (themeMode) {
+                "dark" -> true
+                "light" -> false
+                else -> isSystemInDarkTheme()
+            }
+
+            MaterialTheme(
+                colorScheme = if (darkTheme) DarkColors else LightColors,
+            ) {
                 Msg2LedgerApp(
+                    themeMode = themeMode,
+                    onThemeChange = { newMode ->
+                        themeMode = newMode
+                        preferences.edit().putString("theme_mode", newMode).apply()
+                    },
                     openDatabase = {
                         withContext(Dispatchers.IO) {
                             val database = getDatabasePath("ledger.db")
@@ -189,6 +237,8 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Msg2LedgerApp(
+    themeMode: String,
+    onThemeChange: (String) -> Unit,
     openDatabase: suspend () -> Unit,
     openAppSettings: () -> Unit,
 ) {
@@ -199,7 +249,6 @@ private fun Msg2LedgerApp(
     var selectedCounterparty by rememberSaveable { mutableStateOf("") }
     var refreshKey by remember { mutableStateOf(0) }
     var permissionVersion by remember { mutableStateOf(0) }
-    val scope = rememberCoroutineScope()
     val smsPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { permissionVersion++ }
@@ -213,7 +262,7 @@ private fun Msg2LedgerApp(
 
     val showTabs = currentRoute == Routes.Home || currentRoute == Routes.Settings
     Scaffold(
-        containerColor = AppColors.Canvas,
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             if (currentRoute != Routes.Splash && currentRoute != null) {
                 TopAppBar(
@@ -232,7 +281,7 @@ private fun Msg2LedgerApp(
                                     Routes.Settings -> "Settings"
                                     else -> selectedCounterparty
                                 },
-                                color = AppColors.Ink,
+                                color = MaterialTheme.colorScheme.onBackground,
                                 fontWeight = FontWeight.Bold,
                             )
                             if (currentRoute == Routes.Home) {
@@ -241,7 +290,7 @@ private fun Msg2LedgerApp(
                                         DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.getDefault()),
                                     ),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = AppColors.Muted,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -254,14 +303,14 @@ private fun Msg2LedgerApp(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = AppColors.Canvas,
+                        containerColor = MaterialTheme.colorScheme.background,
                     ),
                 )
             }
         },
         bottomBar = {
             if (showTabs) {
-                NavigationBar(containerColor = AppColors.Card) {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     listOf(Routes.Home to "Home", Routes.Settings to "Settings").forEach { (route, label) ->
                         val selected = backStack?.destination?.hierarchy
                             ?.any { it.route == route } == true
@@ -315,6 +364,8 @@ private fun Msg2LedgerApp(
                 SettingsScreen(
                     context = context,
                     permissionVersion = permissionVersion,
+                    themeMode = themeMode,
+                    onThemeChange = onThemeChange,
                     onRequestSms = {
                         smsPermission.launch(Manifest.permission.RECEIVE_SMS)
                     },
@@ -336,12 +387,18 @@ private fun Msg2LedgerApp(
     }
 }
 
+@OptIn(ExperimentalAnimationGraphicsApi::class)
 @Composable
 private fun SplashScreen(openDatabase: suspend () -> Unit, onFinished: () -> Unit) {
     var message by remember { mutableStateOf("Preparing your private ledger…") }
+    val image = AnimatedImageVector.animatedVectorResource(R.drawable.avd_logo_animated)
+    var atEnd by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
+        atEnd = true
         try {
             openDatabase()
+            delay(1200)
             onFinished()
         } catch (error: Exception) {
             message = "Couldn't prepare the local ledger: ${error.message ?: "unknown error"}"
@@ -350,23 +407,29 @@ private fun SplashScreen(openDatabase: suspend () -> Unit, onFinished: () -> Uni
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .padding(28.dp),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(82.dp)
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(AppColors.Green),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("M", color = Color.White, fontSize = 40.sp, fontWeight = FontWeight.Bold)
-            }
+            Image(
+                painter = rememberAnimatedVectorPainter(image, atEnd),
+                contentDescription = "msg2ledger logo",
+                modifier = Modifier.size(110.dp),
+            )
             Spacer(Modifier.height(18.dp))
-            Text("msg2ledger", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "msg2ledger",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
             Spacer(Modifier.height(10.dp))
-            Text(message, color = AppColors.Muted, textAlign = TextAlign.Center)
+            Text(
+                message,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
@@ -419,9 +482,9 @@ private fun HomeScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         report.insights.forEach { insight ->
                             Row(verticalAlignment = Alignment.Top) {
-                                Text("✦", color = AppColors.Green, fontSize = 18.sp)
+                                Text("✦", color = MaterialTheme.colorScheme.primary, fontSize = 18.sp)
                                 Spacer(Modifier.width(10.dp))
-                                Text(insight, color = AppColors.Ink)
+                                Text(insight, color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
@@ -450,7 +513,7 @@ private fun HomeScreen(
                 CardSurface {
                     Column {
                         report.counterparties.take(12).forEachIndexed { index, payee ->
-                            if (index > 0) HorizontalDivider(color = AppColors.Canvas)
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -459,22 +522,22 @@ private fun HomeScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    Text(payee.name, fontWeight = FontWeight.SemiBold, color = AppColors.Ink)
+                                    Text(payee.name, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                                     Text(
                                         "${payee.category} · ${payee.count} ${
                                             if (payee.count == 1) "payment" else "payments"
                                         }",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = AppColors.Muted,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                                 Column(horizontalAlignment = Alignment.End) {
-                                    Text(formatKsh(payee.spentCents), fontWeight = FontWeight.SemiBold)
+                                    Text(formatKsh(payee.spentCents), fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                                     if (payee.limitCents > 0) {
                                         Text(
                                             "Daily cap ${formatKsh(payee.limitCents)}",
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = AppColors.Muted,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
                                 }
@@ -499,7 +562,7 @@ private fun SpendingSummaryCard(report: Dashboard) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(26.dp),
-        colors = CardDefaults.cardColors(containerColor = AppColors.Green),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary),
     ) {
         Column(
             modifier = Modifier.padding(22.dp),
@@ -507,19 +570,19 @@ private fun SpendingSummaryCard(report: Dashboard) {
         ) {
             Text(
                 "SPENT TODAY",
-                color = Color.White.copy(alpha = 0.78f),
+                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.labelLarge,
                 letterSpacing = 1.1.sp,
             )
             Text(
                 formatKsh(report.spentCents),
-                color = Color.White,
+                color = MaterialTheme.colorScheme.onPrimary,
                 style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
             )
             Text(
                 "${report.transactionCount} transactions · ${formatKsh(report.receivedCents)} received",
-                color = Color.White.copy(alpha = 0.82f),
+                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.82f),
             )
         }
     }
@@ -536,7 +599,7 @@ private fun BudgetOverview(context: Context, report: Dashboard) {
     CardSurface {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             BudgetLine("Today", report.spentCents, dailyBudget)
-            HorizontalDivider(color = AppColors.Canvas)
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
             BudgetLine("Last 7 days", report.weeklySpentCents, weeklyBudget)
         }
     }
@@ -546,10 +609,10 @@ private fun BudgetOverview(context: Context, report: Dashboard) {
 private fun BudgetLine(label: String, spent: Long, budget: Long) {
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+            Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
             Text(
                 if (budget > 0) "${formatKsh(spent)} / ${formatKsh(budget)}" else "${formatKsh(spent)} · no budget set",
-                color = if (budget > 0 && spent > budget) AppColors.Red else AppColors.Muted,
+                color = if (budget > 0 && spent > budget) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -558,8 +621,8 @@ private fun BudgetLine(label: String, spent: Long, budget: Long) {
             androidx.compose.material3.LinearProgressIndicator(
                 progress = { progress },
                 modifier = Modifier.fillMaxWidth(),
-                color = if (spent > budget) AppColors.Red else AppColors.Green,
-                trackColor = AppColors.Mint,
+                color = if (spent > budget) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.primaryContainer,
             )
         }
     }
@@ -613,9 +676,9 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
         report?.let { details ->
             CardSurface {
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("TOTAL SPENT", style = MaterialTheme.typography.labelMedium, color = AppColors.Muted)
-                    Text(formatKsh(details.totalSpentCents), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text("${details.transactionCount} transactions · ${formatKsh(details.weeklyAverageCents)} average per week")
+                    Text("TOTAL SPENT", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(formatKsh(details.totalSpentCents), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Text("${details.transactionCount} transactions · ${formatKsh(details.weeklyAverageCents)} average per week", color = MaterialTheme.colorScheme.onSurface)
                 }
             }
             SectionHeading("Spending pattern", "ALL AVAILABLE HISTORY")
@@ -624,7 +687,7 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
                     Text(
                         details.busiestDay?.let { "You spend most here on $it." }
                             ?: "No outgoing payments found for this regular yet.",
-                        color = AppColors.Ink,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                     details.weekdaySpending.forEach { (day, amount) ->
                         AmountRow(day, "weekday total", formatKsh(amount))
@@ -634,7 +697,7 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
             SectionHeading("Category & limit", "CAP IS PER DAY")
             CardSurface {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Assign a category", fontWeight = FontWeight.Medium)
+                    Text("Assign a category", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
                     CategoryPicker(category) { category = it }
                     OutlinedTextField(
                         value = limitAmount,
@@ -669,7 +732,7 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
                             }
                         },
                         enabled = !saving,
-                        colors = ButtonDefaults.buttonColors(containerColor = AppColors.Green),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                     ) {
                         Text(if (saving) "Saving…" else "Save category and limit")
                     }
@@ -682,7 +745,7 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
                 CardSurface {
                     Column {
                         details.transactions.forEachIndexed { index, transaction ->
-                            if (index > 0) HorizontalDivider(color = AppColors.Canvas)
+                            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -697,7 +760,7 @@ private fun CounterpartyScreen(counterparty: String, onSaved: () -> Unit) {
                                 Text(
                                     "${transaction.kind.replaceFirstChar { it.uppercase() }} · ${transaction.code}",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = AppColors.Muted,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -737,6 +800,8 @@ private fun CategoryPicker(value: String, onSelected: (String) -> Unit) {
 private fun SettingsScreen(
     context: Context,
     permissionVersion: Int,
+    themeMode: String,
+    onThemeChange: (String) -> Unit,
     onRequestSms: () -> Unit,
     onRequestNotifications: () -> Unit,
     openAppSettings: () -> Unit,
@@ -777,6 +842,23 @@ private fun SettingsScreen(
             .padding(horizontal = 18.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        SettingsGroup("APPEARANCE & THEME") {
+            Text("App Theme", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("system" to "System", "light" to "Light", "dark" to "Dark").forEach { (mode, label) ->
+                    FilterChip(
+                        selected = themeMode == mode,
+                        onClick = { onThemeChange(mode) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+            Text(
+                "Choose between system default, light, or dark mode.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         SettingsGroup("BACKGROUND CAPTURE") {
             SettingsStatusRow(
                 "M-PESA SMS access",
@@ -784,12 +866,12 @@ private fun SettingsScreen(
             )
             Text(
                 "Only messages broadcast by sender MPESA are queued. Message contents and the ledger remain on this device.",
-                color = AppColors.Muted,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
             Button(
                 onClick = if (smsAllowed) openAppSettings else onRequestSms,
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Green),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) {
                 Text(if (smsAllowed) "Review app permissions" else "Allow SMS capture")
             }
@@ -800,7 +882,7 @@ private fun SettingsScreen(
             }
         }
         SettingsGroup("SPENDING CHECK-INS") {
-            Text("Notify me", fontWeight = FontWeight.Medium)
+            Text("Notify me", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
             val intervals = listOf(
                 1 to "1 hour",
                 2 to "2 hours",
@@ -821,7 +903,7 @@ private fun SettingsScreen(
             }
             Text(
                 "Android schedules background work inexactly and may defer a check to save battery.",
-                color = AppColors.Muted,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
             SettingsStatusRow(
@@ -868,18 +950,18 @@ private fun SettingsScreen(
                         }
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Green),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) {
                 Text("Save budgets and schedule")
             }
-            status?.let { Text(it, color = AppColors.Green, style = MaterialTheme.typography.bodySmall) }
+            status?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall) }
         }
         SettingsGroup("YOUR DATA") {
             SettingsStatusRow("Database", "Private on-device SQLite")
             SettingsStatusRow("Background jobs", "Apalis queue supervised by Rivium")
             Text(
                 "M-PESA messages are retained locally to parse and review. Notifications are generated on the device; no external AI or financial service is contacted.",
-                color = AppColors.Muted,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -902,9 +984,9 @@ private fun SettingsStatusRow(title: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, fontWeight = FontWeight.Medium, color = AppColors.Ink)
+        Text(title, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
         Spacer(Modifier.width(10.dp))
-        Text(value, color = AppColors.Muted, style = MaterialTheme.typography.bodySmall)
+        Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -913,7 +995,7 @@ private fun CardSurface(content: @Composable () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = AppColors.Card),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
@@ -929,12 +1011,12 @@ private fun SectionHeading(title: String, eyebrow: String? = null) {
         if (eyebrow != null) {
             Text(
                 eyebrow,
-                color = AppColors.Muted,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.labelSmall,
                 letterSpacing = 1.sp,
             )
         }
-        Text(title, color = AppColors.Ink, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(title, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -942,10 +1024,10 @@ private fun SectionHeading(title: String, eyebrow: String? = null) {
 private fun AmountRow(title: String, subtitle: String, amount: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(title, fontWeight = FontWeight.Medium, color = AppColors.Ink)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = AppColors.Muted)
+            Text(title, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(amount, fontWeight = FontWeight.SemiBold, color = AppColors.Ink)
+        Text(amount, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -957,13 +1039,13 @@ private fun EmptyHint(text: String) {
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(AppColors.Mint),
+                    .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("i", color = AppColors.Green, fontWeight = FontWeight.Bold)
+                Text("i", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.width(10.dp))
-            Text(text, color = AppColors.Muted, style = MaterialTheme.typography.bodyMedium)
+            Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -972,7 +1054,7 @@ private fun EmptyHint(text: String) {
 private fun ErrorCard(message: String, onRetry: () -> Unit) {
     CardSurface {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(message, color = AppColors.Red)
+            Text(message, color = MaterialTheme.colorScheme.error)
             OutlinedButton(onClick = onRetry) { Text("Try again") }
         }
     }

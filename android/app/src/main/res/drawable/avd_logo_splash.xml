@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:drawable="@drawable/ic_logo_anim_base">
+    <target android:name="bubble">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="scaleX"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="0" android:duration="210"
+                    android:interpolator="@android:interpolator/overshoot"/>
+                <objectAnimator
+                    android:propertyName="scaleY"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="0" android:duration="210"
+                    android:interpolator="@android:interpolator/overshoot"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="dot1">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="scaleX"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="125" android:duration="110"
+                    android:interpolator="@android:interpolator/overshoot"/>
+                <objectAnimator
+                    android:propertyName="scaleY"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="125" android:duration="110"
+                    android:interpolator="@android:interpolator/overshoot"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="dot2">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="scaleX"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="200" android:duration="110"
+                    android:interpolator="@android:interpolator/overshoot"/>
+                <objectAnimator
+                    android:propertyName="scaleY"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="200" android:duration="110"
+                    android:interpolator="@android:interpolator/overshoot"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="dot3">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="scaleX"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="275" android:duration="110"
+                    android:interpolator="@android:interpolator/overshoot"/>
+                <objectAnimator
+                    android:propertyName="scaleY"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="275" android:duration="110"
+                    android:interpolator="@android:interpolator/overshoot"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="row1">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="trimPathEnd"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="150" android:duration="190"
+                    android:interpolator="@android:interpolator/decelerate_quad"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="row2">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="trimPathEnd"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="225" android:duration="190"
+                    android:interpolator="@android:interpolator/decelerate_quad"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="row3">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="trimPathEnd"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="300" android:duration="190"
+                    android:interpolator="@android:interpolator/decelerate_quad"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="coin">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="translateY"
+                    android:valueFrom="-480" android:valueTo="0"
+                    android:valueType="floatType"
+                    android:startOffset="475" android:duration="260"
+                    android:interpolator="@android:interpolator/bounce"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="check">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="trimPathEnd"
+                    android:valueFrom="0" android:valueTo="1"
+                    android:valueType="floatType"
+                    android:startOffset="700" android:duration="180"
+                    android:interpolator="@android:interpolator/decelerate_quad"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="ring">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="scaleX"
+                    android:valueFrom="0.6" android:valueTo="1.9"
+                    android:valueType="floatType"
+                    android:startOffset="725" android:duration="325"
+                    android:interpolator="@android:interpolator/decelerate_quad"/>
+                <objectAnimator
+                    android:propertyName="scaleY"
+                    android:valueFrom="0.6" android:valueTo="1.9"
+                    android:valueType="floatType"
+                    android:startOffset="725" android:duration="325"
+                    android:interpolator="@android:interpolator/decelerate_quad"/>
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="ring_path">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator
+                    android:propertyName="strokeAlpha"
+                    android:valueFrom="0.8" android:valueTo="0"
+                    android:valueType="floatType"
+                    android:startOffset="725" android:duration="325"
+                    android:interpolator="@android:interpolator/accelerate_decelerate"/>
+            </set>
+        </aapt:attr>
+    </target>
+</animated-vector>
